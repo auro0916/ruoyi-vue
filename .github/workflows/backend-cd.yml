@@ -32,3 +32,17 @@ jobs:
             --task-definition ruoyi-stg-ruoyi \
             --query taskDefinition \
             > task-definition.json
+
+      - name: Update image in task definition
+        run: |
+          IMAGE_URI="555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ inputs.image_tag }}"
+
+          jq \
+            --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[] |=
+              if .name == "ruoyi"
+              then .image = $IMAGE
+              else .
+              end' \
+            task-definition.json \
+            > task-definition-updated.json
