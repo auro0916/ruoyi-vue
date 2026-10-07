@@ -7,7 +7,6 @@ on:
       image_tag:
         description: "ECR image tag to deploy"
         required: true
-        default: "v1.*"
 
 # 允许 GitHub Actions 获取 OIDC Token，并读取仓库内容
 permissions:
@@ -86,7 +85,8 @@ jobs:
           aws ecs update-service \
             --cluster ruoyi-stg-ecs \
             --service ruoyi-stg-ruoyi-service \
-            --task-definition "${{ steps.register-task-def.outputs.task_definition_arn }}"
+            --task-definition "${{ steps.register-task-def.outputs.task_definition_arn }}" \
+            --desired-count 1
 
       # 等待 ECS Service 部署完成，直到新 Task 进入稳定状态
       - name: Wait for ECS service to become stable
