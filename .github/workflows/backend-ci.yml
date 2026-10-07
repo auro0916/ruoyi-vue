@@ -1,5 +1,8 @@
 name: Backend CI
 
+# 触发条件：
+# 1. push 到 main：只执行代码构建检查
+# 2. push v* Tag：构建 Docker Image 并上传到 ECR
 on:
   push:
     branches:
@@ -7,20 +10,26 @@ on:
     tags:
       - "v*"
 
+  # 允许在 GitHub Actions 页面手动运行
   workflow_dispatch:
 
+# id-token 用于 GitHub OIDC 获取 AWS 临时身份
+# contents: read 用于读取当前 GitHub 仓库代码
 permissions:
   id-token: write
   contents: read
 
 jobs:
   build:
+    # 使用 GitHub 提供的临时 Ubuntu Runner
     runs-on: ubuntu-latest
 
     steps:
+      # 把当前 GitHub 仓库代码下载到 Runner
       - name: Checkout source code
         uses: actions/checkout@v7
 
+      # 准备 Java 17 环境，并缓存 Maven 依赖
       - name: Set up Java 17
         uses: actions/setup-java@v6
         with:
@@ -28,15 +37,20 @@ jobs:
           java-version: "17"
           cache: maven
 
+      # 使用 Maven 编译项目并生成 JAR，暂时跳过测试
       - name: Build with Maven
         run: mvn clean package -DskipTests
 
+      # 只有 v* Tag 发布时才构建 Docker Image
+      # Git Tag（例如 v1.1）同时作为 Docker Image Tag
       - name: Build Docker image
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           docker build -t ruoyi-stg:${{ github.ref_name }} .
           docker tag ruoyi-stg:${{ github.ref_name }} 555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ github.ref_name }}
 
+      # 只有正式发布时才通过 GitHub OIDC Assume AWS IAM Role
+      # 获取临时 AWS 凭证，不使用长期 Access Key
       - name: Configure AWS credentials
         if: startsWith(github.ref, 'refs/tags/v')
         uses: aws-actions/configure-aws-credentials@v6.3.0
@@ -44,10 +58,12 @@ jobs:
           role-to-assume: arn:aws:iam::555066174866:role/GitHubActions-RuoYi-ECR-Role
           aws-region: ap-northeast-1
 
+      # 使用临时 AWS 凭证登录 Amazon ECR
       - name: Login to Amazon ECR
         if: startsWith(github.ref, 'refs/tags/v')
         uses: aws-actions/amazon-ecr-login@v2
 
+      # 把刚刚构建好的 Docker Image 上传到 ECR
       - name: Push Docker image to ECR
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
