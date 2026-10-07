@@ -32,9 +32,6 @@ jobs:
       - name: Build Docker image
         run: docker build -t ruoyi-stg:test .
 
-      - name: Debug OIDC claims
-        uses: github/actions-oidc-debugger@main
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
