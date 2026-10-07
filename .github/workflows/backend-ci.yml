@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
 
   workflow_dispatch:
 
@@ -30,19 +32,23 @@ jobs:
         run: mvn clean package -DskipTests
 
       - name: Build Docker image
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          docker build -t ruoyi-stg:${{ github.sha }} .
-          docker tag ruoyi-stg:${{ github.sha }} 555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ github.sha }}
+          docker build -t ruoyi-stg:${{ github.ref_name }} .
+          docker tag ruoyi-stg:${{ github.ref_name }} 555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ github.ref_name }}
 
       - name: Configure AWS credentials
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: arn:aws:iam::555066174866:role/GitHubActions-RuoYi-ECR-Role
           aws-region: ap-northeast-1
 
       - name: Login to Amazon ECR
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push Docker image to ECR
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          docker push 555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ github.sha }}
+          docker push 555066174866.dkr.ecr.ap-northeast-1.amazonaws.com/ruoyi-stg-ruoyi:${{ github.ref_name }}
