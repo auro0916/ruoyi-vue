@@ -6,6 +6,8 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
+        skipDefaultCheckout()
+        timestamps()
     }
 
     tools {
@@ -28,13 +30,23 @@ pipeline {
 
     stages {
 
+        // ==========================================
+        // Stage 1 - Git Checkout
+        // ==========================================
         stage('Git Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/auro0916/ruoyi-vue.git'
+                checkout scm
+
+                sh '''
+                    echo "Current Git Commit:"
+                    git rev-parse HEAD
+                '''
             }
         }
 
+        // ==========================================
+        // Stage 2 - Maven Build
+        // ==========================================
         stage('Maven Build') {
             steps {
                 sh '''
@@ -43,6 +55,9 @@ pipeline {
             }
         }
 
+        // ==========================================
+        // Stage 3 - Verify JAR
+        // ==========================================
         stage('Verify JAR') {
             steps {
                 sh '''
@@ -51,6 +66,9 @@ pipeline {
             }
         }
 
+        // ==========================================
+        // Stage 4 - Docker Build
+        // ==========================================
         stage('Docker Build') {
             steps {
                 sh '''
@@ -61,31 +79,44 @@ pipeline {
             }
         }
 
+        // ==========================================
+        // Stage 5 - ECR Push
+        // ==========================================
         stage('ECR Push') {
             steps {
-                sh '''
-                    #!/bin/bash
-                    set -euo pipefail
+                sh '''#!/bin/bash
+set -euo pipefail
 
-                    export DOCKER_CONFIG="$(mktemp -d)"
-                    trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+export DOCKER_CONFIG="$(mktemp -d)"
+trap 'rm -rf "$DOCKER_CONFIG"' EXIT
 
-                    aws ecr get-login-password \
-                      --region "$AWS_REGION" |
-                    docker login \
-                      --username AWS \
-                      --password-stdin "$ECR_REGISTRY"
+echo "Logging in to Amazon ECR..."
 
-                    docker tag \
-                      "${IMAGE_NAME}:${BUILD_NUMBER}" \
-                      "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
+aws ecr get-login-password \
+  --region "$AWS_REGION" |
+docker login \
+  --username AWS \
+  --password-stdin "$ECR_REGISTRY"
 
-                    docker push \
-                      "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
-                '''
+echo "Tagging Docker image..."
+
+docker tag \
+  "${IMAGE_NAME}:${BUILD_NUMBER}" \
+  "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
+
+echo "Pushing Docker image to Amazon ECR..."
+
+docker push \
+  "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
+
+echo "ECR Push completed."
+'''
             }
         }
 
+        // ==========================================
+        // Stage 6 - Verify ECR Image
+        // ==========================================
         stage('Verify ECR Image') {
             steps {
                 sh '''
@@ -99,6 +130,9 @@ pipeline {
             }
         }
 
+        // ==========================================
+        // Stage 7 - Prepare Task Definition
+        // ==========================================
         stage('Prepare Task Definition') {
             steps {
                 sh '''
@@ -128,6 +162,7 @@ import os
 with open(".ecs/current-task.json", encoding="utf-8") as f:
     current = json.load(f)
 
+# Only retain parameters supported by RegisterTaskDefinition
 allowed = [
     "family",
     "taskRoleArn",
@@ -154,6 +189,7 @@ new_task = {
     if key in current and current[key] is not None
 }
 
+# Construct new ECR image URI
 image = (
     os.environ["ECR_REGISTRY"]
     + "/"
@@ -164,6 +200,7 @@ image = (
 
 updated = False
 
+# Replace only the RuoYi container image
 for container in new_task["containerDefinitions"]:
     if container["name"] == os.environ["ECS_CONTAINER"]:
         container["image"] = image
@@ -172,6 +209,7 @@ for container in new_task["containerDefinitions"]:
 if not updated:
     raise RuntimeError("ECS container not found")
 
+# Preserve existing DB / Redis / Secrets / Logs configuration
 with open(".ecs/new-task.json", "w", encoding="utf-8") as f:
     json.dump(new_task, f, indent=2)
 
@@ -182,6 +220,9 @@ PY
             }
         }
 
+        // ==========================================
+        // Stage 8 - Register Task Definition
+        // ==========================================
         stage('Register Task Definition') {
             steps {
                 sh '''
@@ -201,12 +242,17 @@ PY
             }
         }
 
+        // ==========================================
+        // Stage 9 - Deploy to ECS
+        // ==========================================
         stage('Deploy to ECS') {
             steps {
                 sh '''
                     set -eu
 
                     NEW_TD=$(cat .ecs/new-task-arn.txt)
+
+                    echo "Deploying Task Definition: $NEW_TD"
 
                     aws ecs update-service \
                       --cluster "$ECS_CLUSTER" \
@@ -220,11 +266,16 @@ PY
             }
         }
 
+        // ==========================================
+        // Stage 10 - Wait for ECS Stable
+        // ==========================================
         stage('Wait for ECS Stable') {
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     sh '''
                         set -eu
+
+                        echo "Waiting for ECS Service to become stable..."
 
                         aws ecs wait services-stable \
                           --cluster "$ECS_CLUSTER" \
@@ -237,6 +288,9 @@ PY
             }
         }
 
+        // ==========================================
+        // Stage 11 - Verify ECS Deployment
+        // ==========================================
         stage('Verify ECS Deployment') {
             steps {
                 sh '''
@@ -258,9 +312,9 @@ PY
                       --query 'services[0].runningCount' \
                       --output text)
 
-                    echo "Expected: $EXPECTED_TD"
-                    echo "Actual:   $ACTUAL_TD"
-                    echo "Running:  $RUNNING"
+                    echo "Expected Task Definition: $EXPECTED_TD"
+                    echo "Actual Task Definition:   $ACTUAL_TD"
+                    echo "Running Tasks:            $RUNNING"
 
                     test "$EXPECTED_TD" = "$ACTUAL_TD"
                     test "$RUNNING" = "1"
@@ -271,6 +325,9 @@ PY
         }
     }
 
+    // ==========================================
+    // Post Actions
+    // ==========================================
     post {
         success {
             echo 'RuoYi CI/CD Pipeline SUCCESS!'
