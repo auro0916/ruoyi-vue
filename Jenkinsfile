@@ -10,6 +10,37 @@ pipeline {
         timestamps()
     }
 
+    // ==========================================
+    // Build Parameters
+    // ==========================================
+    parameters {
+        choice(
+            name: 'REF_TYPE',
+            choices: ['BRANCH', 'TAG'],
+            description: '选择构建来源：Git Branch 或 Git Tag'
+        )
+
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            trim: true,
+            description: 'BRANCH 模式填写分支名，例如 main'
+        )
+
+        string(
+            name: 'GIT_TAG',
+            defaultValue: '',
+            trim: true,
+            description: 'TAG 模式填写标签名，例如 v1.0.0'
+        )
+
+        booleanParam(
+            name: 'DEPLOY_TO_ECS',
+            defaultValue: false,
+            description: '勾选后部署到 ECS；不勾选则只构建并推送 ECR'
+        )
+    }
+
     tools {
         maven 'Maven-3'
     }
@@ -31,21 +62,87 @@ pipeline {
     stages {
 
         // ==========================================
-        // Stage 1 - Git Checkout
+        // Stage 1 - Validate Parameters
         // ==========================================
-        stage('Git Checkout') {
+        stage('Validate Parameters') {
             steps {
-                checkout scm
+                script {
+                    if (params.REF_TYPE == 'BRANCH') {
+                        if (!params.GIT_BRANCH?.trim()) {
+                            error('GIT_BRANCH 不能为空')
+                        }
+                    } else if (params.REF_TYPE == 'TAG') {
+                        if (!params.GIT_TAG?.trim()) {
+                            error('GIT_TAG 不能为空')
+                        }
+                    } else {
+                        error("不支持的 REF_TYPE: ${params.REF_TYPE}")
+                    }
 
-                sh '''
-                    echo "Current Git Commit:"
-                    git rev-parse HEAD
-                '''
+                    echo "Git Ref Type: ${params.REF_TYPE}"
+                    echo "Git Branch: ${params.GIT_BRANCH}"
+                    echo "Git Tag: ${params.GIT_TAG}"
+                    echo "Deploy to ECS: ${params.DEPLOY_TO_ECS}"
+                }
             }
         }
 
         // ==========================================
-        // Stage 2 - Maven Build
+        // Stage 2 - Git Checkout
+        // ==========================================
+        stage('Git Checkout') {
+            steps {
+                // Checkout SCM defined in Jenkins Job
+                // Jenkinsfile is loaded from the trusted main branch.
+                checkout scm
+
+                // Fetch requested source version.
+                sh '''#!/bin/bash
+set -euo pipefail
+
+echo "Fetching Git branches and tags..."
+
+git fetch --tags origin \
+  '+refs/heads/*:refs/remotes/origin/*'
+
+if [ "$REF_TYPE" = "BRANCH" ]; then
+
+    echo "Selected Branch: $GIT_BRANCH"
+
+    git check-ref-format --branch "$GIT_BRANCH"
+
+    COMMIT=$(git rev-parse --verify \
+      "refs/remotes/origin/${GIT_BRANCH}^{commit}")
+
+elif [ "$REF_TYPE" = "TAG" ]; then
+
+    echo "Selected Tag: $GIT_TAG"
+
+    git check-ref-format "refs/tags/$GIT_TAG"
+
+    COMMIT=$(git rev-parse --verify \
+      "refs/tags/${GIT_TAG}^{commit}")
+
+else
+    echo "Unsupported Git reference type."
+    exit 1
+fi
+
+echo "Checking out Commit: $COMMIT"
+
+git checkout --detach "$COMMIT"
+
+echo "Resolved Git Commit:"
+git rev-parse HEAD
+
+echo "Latest Commit:"
+git log -1 --format='%h %s'
+'''
+            }
+        }
+
+        // ==========================================
+        // Stage 3 - Maven Build
         // ==========================================
         stage('Maven Build') {
             steps {
@@ -56,18 +153,19 @@ pipeline {
         }
 
         // ==========================================
-        // Stage 3 - Verify JAR
+        // Stage 4 - Verify JAR
         // ==========================================
         stage('Verify JAR') {
             steps {
                 sh '''
+                    test -s ruoyi-admin/target/ruoyi-admin.jar
                     ls -lh ruoyi-admin/target/ruoyi-admin.jar
                 '''
             }
         }
 
         // ==========================================
-        // Stage 4 - Docker Build
+        // Stage 5 - Docker Build
         // ==========================================
         stage('Docker Build') {
             steps {
@@ -80,7 +178,7 @@ pipeline {
         }
 
         // ==========================================
-        // Stage 5 - ECR Push
+        // Stage 6 - ECR Push
         // ==========================================
         stage('ECR Push') {
             steps {
@@ -104,7 +202,7 @@ docker tag \
   "${IMAGE_NAME}:${BUILD_NUMBER}" \
   "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
 
-echo "Pushing Docker image to Amazon ECR..."
+echo "Pushing Docker image..."
 
 docker push \
   "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
@@ -115,7 +213,7 @@ echo "ECR Push completed."
         }
 
         // ==========================================
-        // Stage 6 - Verify ECR Image
+        // Stage 7 - Verify ECR Image
         // ==========================================
         stage('Verify ECR Image') {
             steps {
@@ -131,9 +229,15 @@ echo "ECR Push completed."
         }
 
         // ==========================================
-        // Stage 7 - Prepare Task Definition
+        // Stage 8 - Prepare Task Definition
         // ==========================================
         stage('Prepare Task Definition') {
+            when {
+                expression {
+                    params.DEPLOY_TO_ECS == true
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -162,7 +266,7 @@ import os
 with open(".ecs/current-task.json", encoding="utf-8") as f:
     current = json.load(f)
 
-# Only retain parameters supported by RegisterTaskDefinition
+# Fields accepted by RegisterTaskDefinition
 allowed = [
     "family",
     "taskRoleArn",
@@ -189,7 +293,6 @@ new_task = {
     if key in current and current[key] is not None
 }
 
-# Construct new ECR image URI
 image = (
     os.environ["ECR_REGISTRY"]
     + "/"
@@ -200,7 +303,6 @@ image = (
 
 updated = False
 
-# Replace only the RuoYi container image
 for container in new_task["containerDefinitions"]:
     if container["name"] == os.environ["ECS_CONTAINER"]:
         container["image"] = image
@@ -209,7 +311,6 @@ for container in new_task["containerDefinitions"]:
 if not updated:
     raise RuntimeError("ECS container not found")
 
-# Preserve existing DB / Redis / Secrets / Logs configuration
 with open(".ecs/new-task.json", "w", encoding="utf-8") as f:
     json.dump(new_task, f, indent=2)
 
@@ -221,9 +322,15 @@ PY
         }
 
         // ==========================================
-        // Stage 8 - Register Task Definition
+        // Stage 9 - Register Task Definition
         // ==========================================
         stage('Register Task Definition') {
+            when {
+                expression {
+                    params.DEPLOY_TO_ECS == true
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -243,9 +350,15 @@ PY
         }
 
         // ==========================================
-        // Stage 9 - Deploy to ECS
+        // Stage 10 - Deploy to ECS
         // ==========================================
         stage('Deploy to ECS') {
+            when {
+                expression {
+                    params.DEPLOY_TO_ECS == true
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -267,15 +380,21 @@ PY
         }
 
         // ==========================================
-        // Stage 10 - Wait for ECS Stable
+        // Stage 11 - Wait for ECS Stable
         // ==========================================
         stage('Wait for ECS Stable') {
+            when {
+                expression {
+                    params.DEPLOY_TO_ECS == true
+                }
+            }
+
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     sh '''
                         set -eu
 
-                        echo "Waiting for ECS Service to become stable..."
+                        echo "Waiting for ECS Service..."
 
                         aws ecs wait services-stable \
                           --cluster "$ECS_CLUSTER" \
@@ -289,9 +408,15 @@ PY
         }
 
         // ==========================================
-        // Stage 11 - Verify ECS Deployment
+        // Stage 12 - Verify ECS Deployment
         // ==========================================
         stage('Verify ECS Deployment') {
+            when {
+                expression {
+                    params.DEPLOY_TO_ECS == true
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
